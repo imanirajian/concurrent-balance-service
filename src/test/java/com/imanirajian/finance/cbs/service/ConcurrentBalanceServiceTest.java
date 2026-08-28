@@ -264,8 +264,7 @@ class ConcurrentBalanceServiceTest {
     }
 
     @Test
-    void transferInvariantIsAlwaysPreservedUnderConcurrency()
-            throws Exception {
+    void transferInvariantIsAlwaysPreservedUnderConcurrency() throws Exception {
 
         repo.save(new Account("A", 1_000_000));
         repo.save(new Account("B", 1_000_000));
@@ -286,19 +285,9 @@ class ConcurrentBalanceServiceTest {
                     start.await();
 
                     if ((tx & 1) == 0) {
-                        service.transfer(
-                                "A",
-                                "B",
-                                10,
-                                "AB-" + tx
-                        );
+                        service.transfer("A", "B", 10, "AB-" + tx);
                     } else {
-                        service.transfer(
-                                "B",
-                                "A",
-                                10,
-                                "BA-" + tx
-                        );
+                        service.transfer("B", "A", 10, "BA-" + tx);
                     }
 
                     return null;
@@ -311,17 +300,133 @@ class ConcurrentBalanceServiceTest {
                 future.get(30, TimeUnit.SECONDS);
             }
 
-            long total =
-                    service.getBalance("A")
-                            + service.getBalance("B");
+            long total = service.getBalance("A") + service.getBalance("B");
 
-            assertEquals(
-                    expectedTotal,
-                    total
-            );
+            assertEquals(expectedTotal, total);
+
+            long a = service.getBalance("A");
+            long b = service.getBalance("B");
+
+            assertTrue(a >= 0);
+            assertTrue(b >= 0);
+
+            assertEquals(expectedTotal, a + b);
 
         } finally {
             shutdown(pool);
+        }
+    }
+
+    @Test
+    void concurrentTransfersNeverCreateNegativeBalance() throws Exception {
+        repo.save(new Account("A", 1_000));
+        repo.save(new Account("B", 0));
+
+        int operations = 100;
+
+        var pool = Executors.newFixedThreadPool(32);
+        var start = new CountDownLatch(1);
+        var futures = new ArrayList<Future<Boolean>>();
+
+        try {
+            for (int i = 0; i < operations; i++) {
+                int tx = i;
+
+                futures.add(pool.submit(() -> {
+                    start.await();
+
+                    try {
+                        service.transfer("A", "B", 100, "TX-" + tx);
+
+                        return true;
+
+                    } catch (InsufficientFundsException e) {
+                        return false;
+                    }
+                }));
+            }
+
+            start.countDown();
+
+            long successful = 0;
+
+            for (var future : futures) {
+                if (future.get(10, TimeUnit.SECONDS)) {
+                    successful++;
+                }
+            }
+
+            /*
+             * Only ten transfers can succeed:
+             *
+             * 1000 / 100 = 10
+             */
+            assertEquals(10, successful);
+
+            assertEquals(0, service.getBalance("A"));
+            assertEquals(1_000, service.getBalance("B"));
+
+        } finally {
+            pool.shutdown();
+
+            if (!pool.awaitTermination(5, TimeUnit.SECONDS)) {
+                pool.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    void oppositeDirectionTransfersPreserveInvariantAndDoNotDeadlock()
+            throws Exception {
+
+        repo.save(new Account("A", 1_000_000));
+        repo.save(new Account("B", 1_000_000));
+
+        long expectedTotal = 2_000_000;
+
+        int n = 5_000;
+
+        var pool = Executors.newFixedThreadPool(32);
+        var start = new CountDownLatch(1);
+        var futures = new ArrayList<Future<?>>();
+
+        try {
+            for (int i = 0; i < n; i++) {
+                int tx = i;
+
+                futures.add(pool.submit(() -> {
+                    start.await();
+
+                    if ((tx & 1) == 0) {
+                        service.transfer("A", "B", 10, "AB-" + tx);
+                    } else {
+                        service.transfer("B", "A", 10, "BA-" + tx);
+                    }
+
+                    return null;
+                }));
+            }
+
+            start.countDown();
+
+            for (var future : futures) {
+                future.get(30, TimeUnit.SECONDS);
+            }
+
+            long a = service.getBalance("A");
+            long b = service.getBalance("B");
+
+            assertTrue(a >= 0);
+            assertTrue(b >= 0);
+
+            assertEquals(expectedTotal, a + b);
+
+        } finally {
+            pool.shutdown();
+
+            if (!pool.awaitTermination(5, TimeUnit.SECONDS)) {
+                pool.shutdownNow();
+            }
         }
     }
 

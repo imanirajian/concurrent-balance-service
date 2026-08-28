@@ -1,5 +1,10 @@
 # Concurrent Balance Service
-A high‑performance, thread‑safe, idempotent balance management service built with Java 21 and Spring Boot
+A high‑performance, thread‑safe, idempotent balance management service built with Java 21 and Spring Boot.
+
+> * per-account locks
+> * deterministic multi-lock acquisition
+> * idempotency store
+> * transactional rollback
 
 ## Architecture
                         REST API
@@ -28,15 +33,15 @@ A high‑performance, thread‑safe, idempotent balance management service built
 
 ---
 
-                 TX
+                TX
                  │
                  ▼
         Idempotency Store
                  │
                  ▼
        ┌─────────────────┐
-       │ Account A       │
-       │ Account B       │
+       │    Account A    │
+       │    Account B    │
        └────────┬────────┘
                 │
          deterministic order
@@ -50,16 +55,20 @@ A high‑performance, thread‑safe, idempotent balance management service built
                 ▼
         validate everything
                 │
-          ┌─────┴─────┐
-          │           │
-        fail        success
-          │           │
-          ▼           ▼
-       no mutation   A -= x
-                     B += x
-                          │
-                          ▼
-                    transaction result
+          ┌─────┴───────┐
+          │             │
+        fail         success
+          │             │
+          │             ▼
+          │          snapshot
+          │             │
+          ▼             ▼
+        rollback      A -= x
+       no mutation    B += x
+                        │
+                        ▼
+                      commit
+                 transaction result
 ---
 ## Design
 - Per-account `ReentrantLock`; no global balance lock.
@@ -177,6 +186,11 @@ operation can mutate either account during the transfer.
 
 Account locks are acquired in deterministic order based on account ID, preventing
 deadlocks caused by opposite-direction transfers.
+
+## ACID
+For the in-memory implementation, I provide atomic transfer semantics through coordinated locking, validate-before-mutation, and rollback on unexpected mutation failure. This guarantees that operations through the service do not observe a partially completed transfer. It is not equivalent to a durable database transaction.
+
+I intentionally kept the synchronization local. If this were deployed as multiple JVM instances, I would move the source of truth and transaction boundary to a database and use database transactions/locking or optimistic concurrency rather than simply adding Redis locks.
 
 ## Build
 ```bash
