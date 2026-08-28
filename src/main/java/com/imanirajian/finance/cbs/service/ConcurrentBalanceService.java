@@ -138,11 +138,15 @@ public final class ConcurrentBalanceService implements BalanceService {
     }
 
     private TransactionOutcome executeTransfer(Account source, Account destination, long amount, TransactionFingerprint fingerprint) {
+
         /*
-         * Validate every condition BEFORE mutating either account.
+         * Phase 1: validate EVERYTHING before mutation.
+         *
+         * Neither account has been changed yet.
          */
         if (source.getBalance() < amount) {
-            return TransactionOutcome.failure(fingerprint,
+            return TransactionOutcome.failure(
+                    fingerprint,
                     new InsufficientFundsException(source.getId(), amount, source.getBalance())
             );
         }
@@ -150,24 +154,44 @@ public final class ConcurrentBalanceService implements BalanceService {
         try {
             Math.addExact(destination.getBalance(), amount);
         } catch (ArithmeticException ex) {
-            return TransactionOutcome.failure(
-                    fingerprint,
-                    new InvalidTransactionException(
-                            "Balance overflow"
-                    )
-            );
+            return TransactionOutcome.failure(fingerprint, new InvalidTransactionException("Balance overflow"));
         }
 
         /*
-         * Both locks are held here.
+         * Phase 2: capture the pre-transaction state.
          *
-         * Therefore another operation cannot observe a partially
-         * completed transfer through the public service API.
+         * Both account locks are already held by withOrderedLocks().
+         * Therefore, these snapshots remain stable until the transaction
+         * completes.
          */
-        source.debit(amount);
-        destination.credit(amount);
+        long sourceBalanceBefore = source.getBalance();
+        long destinationBalanceBefore = destination.getBalance();
 
-        return TransactionOutcome.success(fingerprint);
+        try {
+            /*
+             * Phase 3: perform the state mutation.
+             */
+            source.debit(amount);
+            destination.credit(amount);
+
+            return TransactionOutcome.success(fingerprint);
+
+        } catch (RuntimeException ex) {
+
+            /*
+             * Phase 4: compensation / rollback.
+             *
+             * Since both account locks are still held, no other operation
+             * can observe the intermediate state.
+             */
+            source.restoreBalance(sourceBalanceBefore);
+            destination.restoreBalance(destinationBalanceBefore);
+
+            return TransactionOutcome.failure(
+                    fingerprint,
+                    new InvalidTransactionException("Transfer failed and was rolled back", ex)
+            );
+        }
     }
 
     private <T> T withLock(Account account, Supplier<T> operation) {

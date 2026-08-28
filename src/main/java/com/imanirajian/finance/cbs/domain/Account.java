@@ -39,4 +39,8 @@ public final class Account {
         balance -= amount;
     }
 
+    public void restoreBalance(long previousBalance) {
+        this.balance = previousBalance;
+    }
+
 }
